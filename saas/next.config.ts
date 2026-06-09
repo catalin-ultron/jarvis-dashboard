@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Cloudflare next-on-pages handles the build; no static export
 };
 
 export default nextConfig;
