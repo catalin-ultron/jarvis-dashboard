@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   message_count INTEGER DEFAULT 0,
   tool_count INTEGER DEFAULT 0,
   duration_seconds INTEGER DEFAULT 0,
+  model TEXT,
   model_breakdown TEXT, -- JSON string
   start_time TEXT,
   end_time TEXT

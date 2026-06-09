@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDB } from "@/lib/db";
+import { getDB, D1Database } from "@/lib/db";
 
 function getApiKey(req: NextRequest): string | null {
   return req.headers.get("x-api-key");

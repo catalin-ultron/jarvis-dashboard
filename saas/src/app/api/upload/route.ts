@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDB, createId } from "@/lib/db";
+import { getDB, createId, D1Database } from "@/lib/db";
 import { parseClaudeJSONL } from "@/lib/parser";
 
 function getApiKey(req: NextRequest): string | null {

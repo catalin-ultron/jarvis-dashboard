@@ -7,7 +7,7 @@
       "esnext",
       "webworker"
     ],
-    "types": ["@cloudflare/workers-types"],
+    "types": [],
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
@@ -36,8 +36,7 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts",
-    "src/types/**/*.d.ts"
+    "**/*.mts"
   ],
   "exclude": [
     "node_modules"

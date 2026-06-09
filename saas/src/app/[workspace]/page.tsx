@@ -1,34 +1,30 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams } from "next/navigation";
 import Link from "next/link";
-import StatCard from "@/components/StatCard";
-import ModelChart from "@/components/ModelChart";
-import Heatmap from "@/components/Heatmap";
 
-/* ─────────── inline types matching actual API ─────────── */
-
-interface ModelBreakdownItem {
-  model: string; // e.g. "opus", "sonnet", "haiku"
+interface ModelBreakdown {
+  model: string;
   count: number;
   cost: number;
 }
 
-interface DailyActivityItem {
-  day: string; // "2024-01-15"
+interface DailyActivity {
+  day: string;
   sessions: number;
   messages: number;
   cost: number;
 }
 
-interface HourlyActivityItem {
-  hour: number; // 0–23
+interface HourlyActivity {
+  hour: number;
   sessions: number;
   messages: number;
   cost: number;
 }
 
-interface RecentSessionItem {
+interface RecentSession {
   id: string;
   sessionName: string;
   model: string;
@@ -39,362 +35,328 @@ interface RecentSessionItem {
   uploadedAt: string;
 }
 
-interface AnalyticsResponse {
+interface AnalyticsData {
   totalSessions: number;
   totalMessages: number;
   totalTokens: number;
   totalCost: number;
   toolCount: number;
   favoriteModel: string;
-  modelBreakdown: ModelBreakdownItem[];
-  dailyActivity: DailyActivityItem[];
-  hourlyActivity: HourlyActivityItem[];
-  recentSessions: RecentSessionItem[];
+  modelBreakdown: ModelBreakdown[];
+  dailyActivity: DailyActivity[];
+  hourlyActivity: HourlyActivity[];
+  recentSessions: RecentSession[];
 }
 
-/* ─────────── helpers ─────────── */
-
-function formatCurrency(value: number): string {
-  return `$${value.toFixed(2)}`;
+function formatCurrency(n: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(n);
 }
 
-function formatNumber(value: number): string {
-  return value.toLocaleString();
+function formatNumber(n: number) {
+  return new Intl.NumberFormat("en-US").format(n);
 }
 
-function modelPercent(model: string, breakdown: ModelBreakdownItem[]): string {
-  const total = breakdown.reduce((s, m) => s + m.count, 0);
-  const found = breakdown.find((m) => m.model === model);
-  if (!found || total === 0) return "";
-  return `${model} (${Math.round((found.count / total) * 100)}%)`;
-}
-
-function modelColor(model: string): string {
-  if (model === "opus") return "#f6d365";
-  if (model === "haiku") return "#44c98f";
-  return "#00d4ff";
-}
-
-/* ─────────── page ─────────── */
-
-export default function WorkspaceDashboardPage({
-  params,
+function HeatmapCell({
+  intensity,
+  tooltip,
 }: {
-  params: Promise<{ workspace: string }>;
+  intensity: number;
+  tooltip: string;
 }) {
-  const { workspace } = React.use(params);
-  const apiKeyRef = useRef<string>("");
+  const opacity = Math.min(Math.max(intensity, 0.08), 1);
+  return (
+    <div
+      title={tooltip}
+      className="h-8 rounded-sm transition hover:ring-1 hover:ring-white/20"
+      style={{
+        backgroundColor: `rgba(0, 212, 255, ${opacity})`,
+      }}
+    />
+  );
+}
 
-  const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
+function StatCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <div className="bg-panel border border-panel-border rounded-xl p-5 flex flex-col gap-1">
+      <span className="text-muted text-xs uppercase tracking-[0.12em] font-semibold">
+        {label}
+      </span>
+      <span className="text-2xl font-bold text-white">{value}</span>
+    </div>
+  );
+}
+
+export default function WorkspacePage() {
+  const params = useParams<{ workspace: string }>();
+  const workspace = params.workspace;
+
+  const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
-
-  const fetchAnalytics = useCallback(async () => {
-    const apiKey = localStorage.getItem("jarvis_api_key") || "";
-    apiKeyRef.current = apiKey;
-    if (!apiKey) {
-      setError("No API key found. Please log in.");
-      setLoading(false);
-      return;
-    }
-    try {
-      const res = await fetch("/api/analytics", {
-        headers: { "x-api-key": apiKey },
-      });
-      if (!res.ok) {
-        if (res.status === 401) throw new Error("Unauthorized — invalid API key");
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = (await res.json()) as AnalyticsResponse;
-      setAnalytics(data);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load analytics");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    fetchAnalytics();
-    const interval = setInterval(fetchAnalytics, 30000);
-    return () => clearInterval(interval);
-  }, [fetchAnalytics]);
+    let cancelled = false;
 
-  const handleLogout = useCallback(() => {
-    localStorage.removeItem("jarvis_api_key");
-    window.location.href = "/";
-  }, []);
-
-  const handleFileChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-
-      const apiKey = apiKeyRef.current || localStorage.getItem("jarvis_api_key") || "";
+    async function fetchData() {
+      const apiKey = typeof window !== "undefined" ? localStorage.getItem("jarvis_api_key") : null;
       if (!apiKey) {
-        setUploadMsg("No API key found.");
+        if (!cancelled) {
+          setError("No API key found. Set jarvis_api_key in localStorage.");
+          setLoading(false);
+        }
         return;
       }
 
-      setUploading(true);
-      setUploadMsg("Uploading…");
-
       try {
-        const formData = new FormData();
-        formData.append("file", file);
-
-        const res = await fetch("/api/upload", {
-          method: "POST",
+        const res = await fetch("/api/analytics", {
           headers: { "x-api-key": apiKey },
-          body: formData,
         });
-
-        if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
-        setUploadMsg("Upload successful!");
-        await fetchAnalytics();
-      } catch (err) {
-        setUploadMsg(err instanceof Error ? err.message : "Upload failed");
+        if (!res.ok) {
+          const text = await res.text().catch(() => "Unknown error");
+          throw new Error(`Analytics fetch failed: ${res.status} ${text}`);
+        }
+        const json: AnalyticsData = await res.json();
+        if (!cancelled) {
+          setData(json);
+          setError(null);
+        }
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Unexpected error");
+        }
       } finally {
-        setUploading(false);
-        // clear the file input so the same file can be selected again
-        e.target.value = "";
+        if (!cancelled) setLoading(false);
       }
-    },
-    [fetchAnalytics]
-  );
+    }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a1a" }}>
-        <div className="text-[#6b7b8d]">Loading dashboard…</div>
-      </div>
-    );
+    fetchData();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const maxModelCost = useMemo(() => {
+    if (!data?.modelBreakdown.length) return 1;
+    return Math.max(...data.modelBreakdown.map((m) => m.cost));
+  }, [data]);
+
+  const heatmapMaxCost = useMemo(() => {
+    if (!data?.dailyActivity.length) return 1;
+    return Math.max(...data.dailyActivity.map((d) => d.cost));
+  }, [data]);
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const apiKey = typeof window !== "undefined" ? localStorage.getItem("jarvis_api_key") : null;
+    if (!apiKey) {
+      setError("No API key found for upload.");
+      return;
+    }
+
+    setUploading(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "x-api-key": apiKey },
+        body: formData,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "Unknown error");
+        throw new Error(`Upload failed: ${res.status} ${text}`);
+      }
+      // Refresh analytics after upload
+      window.location.reload();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
   }
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: "#0a0a1a", color: "#e0e6ed" }}>
-      {/* Header bar */}
-      <header
-        className="sticky top-0 z-40 border-b px-6 py-4 flex items-center justify-between"
-        style={{ backgroundColor: "#0a0a1a", borderColor: "rgba(0,212,255,0.12)" }}
-      >
-        <h1 className="text-lg font-semibold tracking-tight capitalize">{workspace}</h1>
-        <div className="flex items-center gap-3">
-          <label
-            className="inline-flex cursor-pointer items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-opacity"
-            style={{
-              backgroundColor: "#00d4ff",
-              color: "#0a0a1a",
-              opacity: uploading ? 0.6 : 1,
-            }}
-          >
-            <span>Upload session</span>
-            <input
-              type="file"
-              accept=".jsonl"
-              className="hidden"
-              onChange={handleFileChange}
-              disabled={uploading}
-            />
-          </label>
-          <button
-            onClick={handleLogout}
-            className="rounded-lg border px-4 py-2 text-sm font-medium transition-colors hover:bg-white/5"
-            style={{ borderColor: "rgba(0,212,255,0.2)", color: "#e0e6ed" }}
-          >
-            Logout
-          </button>
+    <main className="max-w-7xl mx-auto px-6 py-8 flex flex-col gap-8">
+      <header className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-white tracking-tight">
+            JARVIS Analytics
+          </h1>
+          <p className="text-muted mt-1">
+            Workspace: <span className="text-foreground font-medium">{workspace}</span>
+          </p>
         </div>
+        <label className="inline-flex items-center gap-2 bg-accent text-black font-semibold rounded-lg px-4 py-2 cursor-pointer hover:brightness-110 transition select-none">
+          {uploading ? "Uploading…" : "Upload Session"}
+          <input
+            ref={fileRef}
+            type="file"
+            className="hidden"
+            onChange={handleFileChange}
+            disabled={uploading}
+          />
+        </label>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8 space-y-10">
-        {error && (
-          <div className="rounded-lg border p-4 text-sm text-red-400" style={{ backgroundColor: "#0d1117", borderColor: "rgba(231,76,60,0.3)" }}>
-            {error}
-          </div>
-        )}
+      {error && (
+        <div className="rounded-lg border border-accent-red/30 bg-accent-red/10 px-4 py-3 text-accent-red text-sm">
+          {error}
+        </div>
+      )}
 
-        {uploadMsg && !error && (
-          <div
-            className="rounded-lg border p-3 text-sm"
-            style={{
-              backgroundColor: uploadMsg.startsWith("Upload successful") ? "rgba(68,201,143,0.08)" : "#0d1117",
-              borderColor: uploadMsg.startsWith("Upload successful") ? "rgba(68,201,143,0.2)" : "rgba(0,212,255,0.12)",
-              color: uploadMsg.startsWith("Upload successful") ? "#44c98f" : "#e0e6ed",
-            }}
-          >
-            {uploadMsg}
-          </div>
-        )}
+      {loading && (
+        <div className="text-muted text-sm">Loading analytics…</div>
+      )}
 
-        {/* ─── Stats row ─── */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard
-            label="Total sessions"
-            value={analytics ? formatNumber(analytics.totalSessions) : "—"}
-            color="accent"
-          />
-          <StatCard
-            label="Total cost"
-            value={analytics ? formatCurrency(analytics.totalCost) : "—"}
-            color="green"
-          />
-          <StatCard
-            label="Total tokens"
-            value={analytics ? formatNumber(analytics.totalTokens) : "—"}
-            color="purple"
-          />
-          <StatCard
-            label="Favorite model"
-            value={
-              analytics
-                ? modelPercent(analytics.favoriteModel, analytics.modelBreakdown)
-                : "—"
-            }
-            color="orange"
-          />
-        </section>
+      {!loading && data && (
+        <>
+          {/* Stats */}
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard
+              label="Total Sessions"
+              value={formatNumber(data.totalSessions)}
+            />
+            <StatCard
+              label="Total Cost"
+              value={formatCurrency(data.totalCost)}
+            />
+            <StatCard
+              label="Total Tokens"
+              value={formatNumber(data.totalTokens)}
+            />
+            <StatCard label="Favorite Model" value={data.favoriteModel} />
+          </section>
 
-        {/* ─── Model breakdown ─── */}
-        <section>
-          <h2 className="text-sm font-semibold uppercase tracking-widest mb-4" style={{ color: "#6b7b8d", letterSpacing: "0.08em" }}>
-            Model breakdown
-          </h2>
-          <div
-            className="rounded-xl border p-5"
-            style={{ backgroundColor: "#0d1117", borderColor: "rgba(0,212,255,0.12)" }}
-          >
-            {analytics && analytics.modelBreakdown.length > 0 ? (
-              <ModelChart
-                data={analytics.modelBreakdown.map((m) => ({
-                  name: m.model.toUpperCase(),
-                  count: m.count,
-                  cost: m.cost,
-                  color: modelColor(m.model),
-                }))}
-              />
+          {/* Model Usage */}
+          <section className="bg-panel border border-panel-border rounded-xl p-5 flex flex-col gap-4">
+            <h2 className="text-lg font-semibold text-white">Model Usage</h2>
+            {data.modelBreakdown.length === 0 ? (
+              <p className="text-muted text-sm">No model data yet.</p>
             ) : (
-              <p className="text-sm" style={{ color: "#6b7b8d" }}>
-                No model data yet.
-              </p>
+              <div className="flex flex-col gap-3">
+                {data.modelBreakdown.map((m) => {
+                  const pct = (m.cost / maxModelCost) * 100;
+                  return (
+                    <div key={m.model} className="flex items-center gap-3">
+                      <span className="text-sm text-muted w-32 shrink-0 truncate">
+                        {m.model}
+                      </span>
+                      <div className="flex-1 bg-white/5 rounded-sm overflow-hidden h-5">
+                        <div
+                          className="h-full rounded-sm bg-accent"
+                          style={{
+                            width: `${pct}%`,
+                            opacity: 0.7 + (pct / 100) * 0.3,
+                          }}
+                        />
+                      </div>
+                      <span className="text-sm text-foreground w-24 text-right shrink-0">
+                        {formatCurrency(m.cost)}
+                      </span>
+                      <span className="text-xs text-muted w-14 text-right shrink-0">
+                        {formatNumber(m.count)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             )}
-          </div>
-        </section>
+          </section>
 
-        {/* ─── Activity heatmap ─── */}
-        <section>
-          <h2 className="text-sm font-semibold uppercase tracking-widest mb-4" style={{ color: "#6b7b8d", letterSpacing: "0.08em" }}>
-            Activity heatmap
-          </h2>
-          <div
-            className="rounded-xl border p-5"
-            style={{ backgroundColor: "#0d1117", borderColor: "rgba(0,212,255,0.12)" }}
-          >
-            {analytics && analytics.dailyActivity.length > 0 ? (
-              <Heatmap
-                data={analytics.dailyActivity.map((d) => ({
-                  date: d.day,
-                  cost: d.cost,
-                }))}
-                weeks={12}
-              />
+          {/* Activity Heatmap */}
+          <section className="bg-panel border border-panel-border rounded-xl p-5 flex flex-col gap-4">
+            <h2 className="text-lg font-semibold text-white">
+              Activity Heatmap <span className="text-muted text-sm font-normal">(Daily Cost)</span>
+            </h2>
+            {data.dailyActivity.length === 0 ? (
+              <p className="text-muted text-sm">No daily activity yet.</p>
             ) : (
-              <p className="text-sm" style={{ color: "#6b7b8d" }}>
-                No activity data yet.
-              </p>
+              <div className="grid grid-cols-7 gap-1">
+                {data.dailyActivity.map((d) => (
+                  <HeatmapCell
+                    key={d.day}
+                    intensity={heatmapMaxCost > 0 ? d.cost / heatmapMaxCost : 0}
+                    tooltip={`${d.day} — ${formatCurrency(d.cost)} — ${d.sessions} sessions, ${d.messages} messages`}
+                  />
+                ))}
+              </div>
             )}
-          </div>
-        </section>
+          </section>
 
-        {/* ─── Recent sessions table ─── */}
-        <section>
-          <h2 className="text-sm font-semibold uppercase tracking-widest mb-4" style={{ color: "#6b7b8d", letterSpacing: "0.08em" }}>
-            Recent sessions
-          </h2>
-          <div
-            className="rounded-xl border overflow-hidden"
-            style={{ backgroundColor: "#0d1117", borderColor: "rgba(0,212,255,0.12)" }}
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr style={{ borderBottom: "1px solid rgba(0,212,255,0.12)" }}>
-                    <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Name
-                    </th>
-                    <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Model
-                    </th>
-                    <th className="text-right px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Tokens
-                    </th>
-                    <th className="text-right px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Cost
-                    </th>
-                    <th className="text-right px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Messages
-                    </th>
-                    <th className="text-right px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Tools
-                    </th>
-                    <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wider" style={{ color: "#6b7b8d" }}>
-                      Date
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {analytics && analytics.recentSessions.length > 0 ? (
-                    analytics.recentSessions.map((s) => (
-                      <tr
-                        key={s.id}
-                        className="transition-colors hover:bg-white/[0.02]"
-                        style={{ borderBottom: "1px solid rgba(0,212,255,0.06)" }}
-                      >
-                        <td className="px-5 py-3">
+          {/* Recent Sessions */}
+          <section className="bg-panel border border-panel-border rounded-xl p-5 flex flex-col gap-4">
+            <h2 className="text-lg font-semibold text-white">Recent Sessions</h2>
+            {data.recentSessions.length === 0 ? (
+              <p className="text-muted text-sm">No sessions yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-panel-border text-muted uppercase text-xs tracking-wider">
+                      <th className="py-3 pr-4">Name</th>
+                      <th className="py-3 pr-4">Model</th>
+                      <th className="py-3 pr-4 text-right">Tokens</th>
+                      <th className="py-3 pr-4 text-right">Cost</th>
+                      <th className="py-3 pr-4 text-right">Messages</th>
+                      <th className="py-3 pr-4 text-right">Tools</th>
+                      <th className="py-3 pr-4">Date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-panel-border">
+                    {data.recentSessions.map((s) => (
+                      <tr key={s.id}>
+                        <td className="py-3 pr-4">
                           <Link
                             href={`/${workspace}/sessions/${s.id}`}
-                            className="hover:underline"
-                            style={{ color: "#00d4ff" }}
+                            className="text-accent hover:underline"
                           >
-                            {s.sessionName}
+                            {s.sessionName || s.id}
                           </Link>
                         </td>
-                        <td className="px-5 py-3" style={{ color: "#e0e6ed" }}>
-                          {s.model}
-                        </td>
-                        <td className="px-5 py-3 text-right tabular-nums" style={{ color: "#e0e6ed" }}>
+                        <td className="py-3 pr-4 text-muted">{s.model}</td>
+                        <td className="py-3 pr-4 text-right">
                           {formatNumber(s.totalTokens)}
                         </td>
-                        <td className="px-5 py-3 text-right tabular-nums" style={{ color: "#e0e6ed" }}>
+                        <td className="py-3 pr-4 text-right">
                           {formatCurrency(s.totalCost)}
                         </td>
-                        <td className="px-5 py-3 text-right tabular-nums" style={{ color: "#e0e6ed" }}>
+                        <td className="py-3 pr-4 text-right">
                           {formatNumber(s.messageCount)}
                         </td>
-                        <td className="px-5 py-3 text-right tabular-nums" style={{ color: "#e0e6ed" }}>
+                        <td className="py-3 pr-4 text-right">
                           {formatNumber(s.toolCount)}
                         </td>
-                        <td className="px-5 py-3" style={{ color: "#e0e6ed" }}>
+                        <td className="py-3 pr-4 text-muted whitespace-nowrap">
                           {new Date(s.uploadedAt).toLocaleDateString()}
                         </td>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={7} className="px-5 py-12 text-center" style={{ color: "#6b7b8d" }}>
-                        No sessions yet. Upload your first session to get started.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+    </main>
   );
 }
