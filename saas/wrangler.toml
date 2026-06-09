@@ -1,0 +1,18 @@
+name = "jarvis-saas"
+compatibility_date = "2026-06-01"
+
+# D1 database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "jarvis-saas-db"
+database_id = "__PLACEHOLDER__"
+
+# R2 bucket for uploaded session files (optional, for large backups)
+[[r2_buckets]]
+binding = "SESSIONS"
+bucket_name = "jarvis-saas-sessions"
+
+# KV for caching/sessions
+[[kv_namespaces]]
+binding = "CACHE"
+id = "__PLACEHOLDER__"
