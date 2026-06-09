@@ -1,10 +1,11 @@
 // ── Claude Code JSONL Parser ───────────────────────────────────
 // Parses Claude Code transcript files into structured session data.
-// Each line is a JSON object. Key fields:
-//   type: "assistant" | "user" | "progress" | "system" | "streaming"
-//   timestamp: ISO string
-//   slug: project name
-//   message: { model, stop_reason, usage: { input_tokens, output_tokens }, content[] }
+//
+// Claude Code JSONL format (each line is a JSON object):
+//   { type: "user",     timestamp: "2024-01-15T10:00:00Z", message: { content: [{type:"text",text:"..."}] } }
+//   { type: "assistant",timestamp: "2024-01-15T10:00:01Z", message: { model:"...", usage:{input_tokens:N,output_tokens:M}, content:[...], stop_reason:"..." } }
+//   { type: "system",   subtype: "turn_duration", duration_seconds: N }
+//   { type: "progress", data: { message: "..." } }
 // ────────────────────────────────────────────────────────────────
 
 export type ModelFamily = "opus" | "sonnet" | "haiku";
@@ -32,6 +33,7 @@ export interface ClaudeRecord {
   data?: { type?: string; agentId?: string; parentToolUseID?: string; message?: string };
 }
 
+// Raw message in our internal representation
 export interface ParsedMessage {
   role: string;
   model?: string;
@@ -47,7 +49,6 @@ export interface ParsedMessage {
 export interface ParsedSession {
   sessionName: string;
   fileName: string;
-  messages: ParsedMessage[];
   model?: string;
   modelFamily: ModelFamily;
   totalInputTokens: number;
@@ -61,8 +62,10 @@ export interface ParsedSession {
   endTime?: string;
   hourlyActivity: Record<number, number>;
   dailyCost: Record<string, number>;
+  messages: ParsedMessage[];
 }
 
+// Claude pricing per-million tokens (USD)
 export const CLAUDE_PRICING: Record<ModelFamily, { input: number; output: number }> = {
   opus:   { input: 15,    output: 75 },
   sonnet: { input: 3,     output: 15 },
@@ -77,23 +80,31 @@ export function getModelFamily(model?: string): ModelFamily {
   return "sonnet";
 }
 
-export function calculateCost(inputTokens: number, outputTokens: number, model: string): number {
+export function formatModel(m?: string): string {
+  if (!m) return "CLAUDE";
+  if (m.includes("opus")) return "OPUS";
+  if (m.includes("sonnet")) return "SONNET";
+  if (m.includes("haiku")) return "HAIKU";
+  return m.split("-").pop()?.toUpperCase() || "CLAUDE";
+}
+
+export function calculateCost(inputTokens: number, outputTokens: number, model?: string): number {
   const family = getModelFamily(model);
   const rates = CLAUDE_PRICING[family] || CLAUDE_PRICING.sonnet;
   const cost = (inputTokens * rates.input + outputTokens * rates.output) / 1e6;
   return Number(cost.toFixed(6));
 }
 
-export function formatTokens(n: number): string {
+export function fmtTokens(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return String(n);
 }
 
-export function formatCost(n: number): string {
+export function fmtCost(n: number): string {
   if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "K";
-  if (n < 0.01) return "<$0.01";
+  if (n < 0.01 && n > 0) return "<$0.01";
   return "$" + n.toFixed(2);
 }
 
@@ -126,12 +137,12 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
       }
 
       // Session name from slug
-      if (rec.slug && !sessionName) {
+      if (rec.slug) {
         sessionName = rec.slug;
       }
 
       // System turn duration
-      if (rec.type === "system" && rec.subtype === "turn_duration" && rec.duration_seconds) {
+      if (rec.type === "system" && rec.subtype === "turn_duration" && typeof rec.duration_seconds === "number") {
         durationSeconds += rec.duration_seconds;
         continue;
       }
@@ -143,7 +154,7 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
         }
         const inputTokens = rec.message.usage?.input_tokens || 0;
         const outputTokens = rec.message.usage?.output_tokens || 0;
-        const cost = calculateCost(inputTokens, outputTokens, rec.message.model || model || "");
+        const cost = calculateCost(inputTokens, outputTokens, rec.message.model || model);
 
         totalInputTokens += inputTokens;
         totalOutputTokens += outputTokens;
@@ -153,7 +164,7 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
         // Extract tool uses from content
         let toolName: string | undefined;
         let toolInput: string | undefined;
-        if (rec.message.content) {
+        if (Array.isArray(rec.message.content)) {
           for (const block of rec.message.content) {
             if (block.type === "tool_use") {
               toolCount++;
@@ -165,10 +176,10 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
           }
         }
 
-        // Hourly activity
+        // Hourly / daily activity
         if (rec.timestamp) {
-          const h = new Date(rec.timestamp).getHours();
-          hourlyActivity[h] = (hourlyActivity[h] || 0) + 1;
+          const d = new Date(rec.timestamp);
+          hourlyActivity[d.getHours()] = (hourlyActivity[d.getHours()] || 0) + 1;
           const day = rec.timestamp.slice(0, 10);
           dailyCost[day] = (dailyCost[day] || 0) + cost;
         }
@@ -177,8 +188,8 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
           role: "assistant",
           model: rec.message.model || model,
           content: rec.message.content
-            ?.filter((b) => b.type === "text" && b.text)
-            .map((b) => b.text)
+            ?.filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text as string)
             .join("\n") || undefined,
           toolName,
           toolInput,
@@ -192,14 +203,18 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
       // User message
       if (rec.type === "user" && rec.message?.content) {
         messageCount++;
-        const text = rec.message.content
-          .filter((b: {type: string, text?: string}) => b.type === "text")
-          .map((b: {type: string, text?: string}) => b.text)
-          .join("\n");
+        const text = (Array.isArray(rec.message.content)
+          ? rec.message.content
+              .filter((b) => b.type === "text" && typeof b.text === "string")
+              .map((b) => b.text as string)
+          : typeof rec.message.content === "string"
+            ? [rec.message.content]
+            : [] as string[]
+        ).join("\n");
 
         if (rec.timestamp) {
-          const h = new Date(rec.timestamp).getHours();
-          hourlyActivity[h] = (hourlyActivity[h] || 0) + 1;
+          const d = new Date(rec.timestamp);
+          hourlyActivity[d.getHours()] = (hourlyActivity[d.getHours()] || 0) + 1;
         }
 
         messages.push({
@@ -212,7 +227,7 @@ export function parseClaudeJSONL(text: string, fileName: string): ParsedSession 
         });
       }
     } catch {
-      // skip malformed lines
+      // skip malformed lines silently
     }
   }
 
